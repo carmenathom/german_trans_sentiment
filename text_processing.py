@@ -69,7 +69,6 @@ def main():
                                   quotechar = '"', on_bad_lines = "skip", 
                                   escapechar="\\", engine="python", 
                                   sep = "\t", header = None)
-    
     polly = pd.read_csv("dataset/sentiment/POLLY.csv", 
                                   quotechar = '"', on_bad_lines = "skip", 
                                   escapechar="\\", engine="python", 
@@ -81,14 +80,12 @@ def main():
     germeval21_train = germeval21_train.drop(columns = ["comment_id", "Sub2_Engaging", "Sub3_FactClaiming"])
     germeval21_test = germeval21_test.drop(columns = ["comment_id", "Sub2_Engaging", "Sub3_FactClaiming"])
 
-
     germeval18_train.columns = ["text", "offensive"]
     germeval18_test.columns = ["text", "offensive"]
     germeval21_train.columns = ["text", "toxic"]
     germeval21_test.columns = ["text", "toxic"]
     hasoc.columns = ["label", "text"]
     polly.columns = ["label", "text"]
-
 
     offensive_mapping = {"OTHER": 0, "OFFENSE": 1}
     label_mapping = {"n": 0, "p": 1, "hs": 2}
@@ -107,12 +104,19 @@ def main():
     polly["cleaned_text"] = polly["text"].apply(clean_text)
     hatr["cleaned_text"] = hatr["text"].apply(clean_text)
 
+    hate_df = pd.concat([hasoc, polly, hatr], ignore_index = True)
+    shuffle_hate_df = hate_df.sample(frac = 1)
+    train_size = int(0.7 * len(shuffle_hate_df))
 
-    # next: bert w/ 3 attention heads 
-    # classification_head_offense (GermEval18) 
-    # classification_head_toxicity (GermEval21) 
-    # classification_head_hate (HASOC/POLLY/HATR)
-    
+    hate_train = shuffle_hate_df[:train_size]
+    hate_test = shuffle_hate_df[train_size:]
+
+    germeval18_train.to_csv('dataset/sentiment/clean/germeval18_train.csv', index=False) 
+    germeval18_test.to_csv('dataset/sentiment/clean/germeval18_test.csv', index=False) 
+    germeval21_train.to_csv('dataset/sentiment/clean/germeval21_train.csv', index=False) 
+    germeval21_test.to_csv('dataset/sentiment/clean/germeval21_test.csv', index=False) 
+    hate_train.to_csv('dataset/sentiment/clean/hate_train.csv', index=False) 
+    hate_test.to_csv('dataset/sentiment/clean/hate_test.csv', index=False) 
 
 if __name__ == "__main__":
     main()
