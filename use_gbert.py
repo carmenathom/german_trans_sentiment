@@ -2,34 +2,30 @@ import torch
 from transformers import AutoTokenizer, AutoModel
 from torch import nn
 
-class MultiTaskGBERT(nn.Module):
-    def __init__(
-        self,
-        pretrained_model="deepset/gbert-base",
-        num_labels_offense = 2,
-        num_labels_toxic = 2,
-        num_labels_hate = 3
-    ):
-        super().__init__()
 
+class MultiHeadGBERT(nn.Module):
+    def __init__(self, pretrained_model="deepset/gbert-base",
+                 num_labels_offense=2, num_labels_toxic=2, num_labels_hate=3):
+        super().__init__()
         self.bert = AutoModel.from_pretrained(pretrained_model)
         hidden_size = self.bert.config.hidden_size
 
-        self.offense = nn.Linear(hidden_size, num_labels_offense)
-        self.toxic = nn.Linear(hidden_size, num_labels_toxic)
-        self.hate = nn.Linear(hidden_size, num_labels_hate)
+        self.classifier_offense = nn.Linear(hidden_size, num_labels_offense)
+        self.classifier_toxic = nn.Linear(hidden_size, num_labels_toxic)
+        self.classifier_hate = nn.Linear(hidden_size, num_labels_hate)
 
     def forward(self, input_ids, attention_mask):
-        outputs = self.bert(input_ids = input_ids, attention_mask = attention_mask)
-        cls = outputs.last_hidden_state[:, 0, :]  
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        pooled_output = outputs.last_hidden_state[:, 0, :]
 
         return {
-            "offense": self.offense(cls),
-            "toxic": self.toxic(cls),
-            "hate": self.hate(cls),
+            "offense": self.classifier_offense(pooled_output),
+            "toxic": self.classifier_toxic(pooled_output),
+            "hate": self.classifier_hate(pooled_output)
         }
 
-def predict(sentence: str):
+
+def predict(sentence, model, tokenizer, device):
     encoded = tokenizer(
         sentence,
         truncation = True,
@@ -44,39 +40,35 @@ def predict(sentence: str):
     with torch.no_grad():
         outputs = model(input_ids, attention_mask)
 
-    softmax = torch.nn.functional.softmax
-
-    offense = torch.argmax(softmax(outputs["offense"], dim = 1)).item()
-    toxic   = torch.argmax(softmax(outputs["toxic"], dim = 1)).item()
-    hate    = torch.argmax(softmax(outputs["hate"], dim = 1)).item()
+    offense = torch.argmax(outputs["offense"], dim=1).item()
+    toxic   = torch.argmax(outputs["toxic"],   dim=1).item()
+    hate    = torch.argmax(outputs["hate"],    dim=1).item()
 
     return offense, toxic, hate
+
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = MultiTaskGBERT()
-    state_dict = torch.load("gbert_model.pt", map_location=device)
-
-    model.load_state_dict(state_dict, strict=False)
-
+    model = MultiHeadGBERT()
+    model.load_state_dict(torch.load("gbert_model.pt", map_location=device))
     model.to(device)
     model.eval()
 
     tokenizer = AutoTokenizer.from_pretrained("deepset/gbert-base")
 
     sentences = [
-        "Ich liebe Trans Leute.",
+        "Ein normal Satz.",
         "Ich hasse Trans Leute.",
     ]
 
     for s in sentences:
-        o, t, h = predict(s)
+        o, t, h = predict(s, model, tokenizer, device)
         print(f"Sentence: {s}")
         print(f"  Offense = {o}")
         print(f"  Toxic   = {t}")
-        print(f"  Hate    = {h}")
-        print()
+        print(f"  Hate    = {h}\n")
 
-if __name__ == __main__():
+
+if __name__ == "__main__":
     main()

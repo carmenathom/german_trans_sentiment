@@ -6,12 +6,14 @@ from torch.optim import AdamW
 import pandas as pd
 import numpy as np
 from itertools import cycle
+from sklearn.utils.class_weight import compute_class_weight
+
 
 class TextDataset(Dataset):
     def __init__(self, tokenized_inputs, labels):
         self.input_ids = tokenized_inputs["input_ids"]
         self.attention_mask = tokenized_inputs["attention_mask"]
-        self.labels = torch.tensor(labels, dtype = torch.long)
+        self.labels = torch.tensor(labels, dtype=torch.long)
 
     def __len__(self):
         return len(self.labels)
@@ -23,10 +25,11 @@ class TextDataset(Dataset):
             "label": self.labels[idx]
         }
 
+
 class MultiHeadGBERT(nn.Module):
-    def __init__(self, pretrained_model="deepset/gbert-base",
+    def __init__(self, pretrained_model = "deepset/gbert-base",
                  num_labels_offense = 2, num_labels_toxic = 2, num_labels_hate = 3):
-        super(MultiHeadGBERT, self).__init__()
+        super().__init__()
         self.bert = AutoModel.from_pretrained(pretrained_model)
         hidden_size = self.bert.config.hidden_size
 
@@ -36,13 +39,14 @@ class MultiHeadGBERT(nn.Module):
 
     def forward(self, input_ids, attention_mask):
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        pooled_output = outputs.last_hidden_state[:, 0, :]  
+        pooled_output = outputs.last_hidden_state[:, 0, :]
 
         return {
             "offense": self.classifier_offense(pooled_output),
             "toxic": self.classifier_toxic(pooled_output),
             "hate": self.classifier_hate(pooled_output)
         }
+
 
 def tokenize_texts(tokenizer, texts, max_length = 128):
     return tokenizer(
@@ -53,11 +57,13 @@ def tokenize_texts(tokenizer, texts, max_length = 128):
         return_tensors = "pt"
     )
 
+
 def create_dataloader(df, text_col, label_col, tokenizer, batch_size = 16, shuffle = True):
     tokenized = tokenize_texts(tokenizer, df[text_col])
     labels = df[label_col].tolist()
     dataset = TextDataset(tokenized, labels)
     return DataLoader(dataset, batch_size = batch_size, shuffle = shuffle)
+
 
 def evaluate(model, dataloader, head, device, criterion):
     model.eval()
@@ -75,21 +81,23 @@ def evaluate(model, dataloader, head, device, criterion):
             loss = criterion(outputs, labels)
             total_loss += loss.item() * input_ids.size(0)
 
-            preds = torch.argmax(outputs, dim = 1)
+            preds = torch.argmax(outputs, dim=1)
             correct += (preds == labels).sum().item()
             total += labels.size(0)
 
-    avg_loss = total_loss / total
-    accuracy = correct / total
-    return avg_loss, accuracy
+    return total_loss / total, correct / total
+
 
 def train_multitask(model, dataloaders_train, dataloaders_val, class_weights, device,
                     epochs = 5, patience = 2):
     optimizer = AdamW(model.parameters(), lr = 2e-5)
 
-    criterion_offense = nn.CrossEntropyLoss(weight=class_weights["offense"].to(device))
-    criterion_toxic   = nn.CrossEntropyLoss(weight=class_weights["toxic"].to(device))
-    criterion_hate    = nn.CrossEntropyLoss(weight=class_weights["hate"].to(device))
+    for task in class_weights:
+        class_weights[task] = class_weights[task].to(device).float()
+
+    criterion_offense = nn.CrossEntropyLoss(weight=class_weights["offense"])
+    criterion_toxic = nn.CrossEntropyLoss(weight=class_weights["toxic"])
+    criterion_hate = nn.CrossEntropyLoss(weight=class_weights["hate"])
 
     best_val_loss = np.inf
     patience_counter = 0
@@ -98,9 +106,11 @@ def train_multitask(model, dataloaders_train, dataloaders_val, class_weights, de
     iter_toxic   = cycle(dataloaders_train["toxic"])
     iter_hate    = cycle(dataloaders_train["hate"])
 
-    steps_per_epoch = max(len(dataloaders_train["offense"]),
-                          len(dataloaders_train["toxic"]),
-                          len(dataloaders_train["hate"]))
+    steps_per_epoch = max(
+        len(dataloaders_train["offense"]),
+        len(dataloaders_train["toxic"]),
+        len(dataloaders_train["hate"])
+    )
 
     for epoch in range(epochs):
         model.train()
@@ -131,34 +141,38 @@ def train_multitask(model, dataloaders_train, dataloaders_val, class_weights, de
             outputs = model(input_ids, attention_mask)
             loss_hate = criterion_hate(outputs["hate"], labels)
 
-            total_loss = loss_offense + loss_toxic + loss_hate
+            total_loss = (
+                1.0 * loss_offense +
+                1.0 * loss_toxic +
+                3.0 * loss_hate   
+            )
+
             total_loss.backward()
             optimizer.step()
 
             total_loss_epoch += total_loss.item()
-            if step % 10 == 0:
-                print(f"Step {step}, Batch Loss: {total_loss.item():.4f}")
 
         model.eval()
         val_loss_offense, val_acc_offense = evaluate(model, dataloaders_val["offense"], "offense", device, criterion_offense)
-        val_loss_toxic, val_acc_toxic = evaluate(model, dataloaders_val["toxic"], "toxic", device, criterion_toxic)
-        val_loss_hate, val_acc_hate = evaluate(model, dataloaders_val["hate"], "hate", device, criterion_hate)
+        val_loss_toxic,   val_acc_toxic   = evaluate(model, dataloaders_val["toxic"],   "toxic",   device, criterion_toxic)
+        val_loss_hate,    val_acc_hate    = evaluate(model, dataloaders_val["hate"],    "hate",    device, criterion_hate)
 
         avg_val_loss = val_loss_offense + val_loss_toxic + val_loss_hate
+
         print(f"Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
         print(f"Offense Acc: {val_acc_offense:.4f}, Toxic Acc: {val_acc_toxic:.4f}, Hate Acc: {val_acc_hate:.4f}")
 
-        # Early stopping
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), "multihead_gbert_best.pt")
+            torch.save(model.state_dict(), "gbert_model.pt")
             print("Saved best model.")
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print("Early stopping triggered.")
                 break
+
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -173,18 +187,17 @@ def main():
 
     germeval18_train = germeval18_train.dropna(subset=["offensive"])
     germeval18_test  = germeval18_test.dropna(subset=["offensive"])
-    germeval18_train["offensive"] = germeval18_train["offensive"].astype(int)
-    germeval18_test["offensive"] = germeval18_test["offensive"].astype(int)
-
     germeval21_train = germeval21_train.dropna(subset=["toxic"])
     germeval21_test  = germeval21_test.dropna(subset=["toxic"])
-    germeval21_train["toxic"] = germeval21_train["toxic"].astype(int)
-    germeval21_test["toxic"] = germeval21_test["toxic"].astype(int)
+    hate_train       = hate_train.dropna(subset=["label"])
+    hate_test        = hate_test.dropna(subset=["label"])
 
-    hate_train = hate_train.dropna(subset=["label"])
-    hate_test  = hate_test.dropna(subset=["label"])
-    hate_train["label"] = hate_train["label"].astype(int)
-    hate_test["label"] = hate_test["label"].astype(int)
+    germeval18_train["offensive"] = germeval18_train["offensive"].astype(int)
+    germeval18_test["offensive"]  = germeval18_test["offensive"].astype(int)
+    germeval21_train["toxic"]     = germeval21_train["toxic"].astype(int)
+    germeval21_test["toxic"]      = germeval21_test["toxic"].astype(int)
+    hate_train["label"]           = hate_train["label"].astype(int)
+    hate_test["label"]            = hate_test["label"].astype(int)
 
     batch_size = 16
     dl_train = {
@@ -193,22 +206,31 @@ def main():
         "hate":    create_dataloader(hate_train, "cleaned_text", "label", tokenizer, batch_size)
     }
     dl_val = {
-        "offense": create_dataloader(germeval18_test, "cleaned_text", "offensive", tokenizer, batch_size, shuffle = False),
-        "toxic":   create_dataloader(germeval21_test, "cleaned_text", "toxic", tokenizer, batch_size, shuffle = False),
-        "hate":    create_dataloader(hate_test, "cleaned_text", "label", tokenizer, batch_size, shuffle = False)
+        "offense": create_dataloader(germeval18_test, "cleaned_text", "offensive", tokenizer, batch_size, shuffle=False),
+        "toxic":   create_dataloader(germeval21_test, "cleaned_text", "toxic", tokenizer, batch_size, shuffle=False),
+        "hate":    create_dataloader(hate_test, "cleaned_text", "label", tokenizer, batch_size, shuffle=False)
     }
 
+    weights_hate = compute_class_weight(
+        class_weight="balanced",
+        classes=np.array([0, 1, 2]),
+        y=hate_train["label"].values
+    )
+
     class_weights = {
-        "offense": torch.tensor([1.0, (len(germeval18_train) / germeval18_train["offensive"].sum()) - 1], dtype = torch.float32).to(device),
-        "toxic":   torch.tensor([1.0, (len(germeval21_train) / germeval21_train["toxic"].sum()) - 1], dtype = torch.float32).to(device),
-        "hate":    torch.tensor([1.0, 1.0, 1.0], dtype = torch.float32).to(device)  
+        "offense": torch.tensor([1.0, (len(germeval18_train) / germeval18_train["offensive"].sum()) - 1]).to(device),
+        "toxic":   torch.tensor([1.0, (len(germeval21_train) / germeval21_train["toxic"].sum()) - 1]).to(device),
+        "hate":    torch.tensor(weights_hate, dtype=torch.float32).to(device)
     }
+
+    print("HATE CLASS WEIGHTS:", class_weights["hate"])
 
     model = MultiHeadGBERT()
     model.to(device)
-
     train_multitask(model, dl_train, dl_val, class_weights, device, epochs=5, patience=2)
+
     print("Training complete.")
+
 
 if __name__ == "__main__":
     main()
